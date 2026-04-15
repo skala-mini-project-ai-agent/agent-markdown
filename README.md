@@ -169,8 +169,7 @@ pytest -q
 
 - 윤세준 : Report Generation, Reference Trace, Markdown/HTML/PDF Rendering
 - 이다연 : Supervisor Orchestration, App Integration, Execution State Management
-- 이영훈 : Search Pipeline, Evidence Normalization, Quality Gate and Retry
-    Signal Design
+- 이영훈 : Search Pipeline, Evidence Normalization, Quality Gate and Retry Signal Design
 
 ## References
 

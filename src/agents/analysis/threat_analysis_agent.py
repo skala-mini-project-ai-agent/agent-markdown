@@ -122,21 +122,24 @@ class ThreatAnalysisAgent:
         evidence_items: Iterable[Any],
         trl_result: Any | None = None,
     ) -> ThreatAnalysisResult:
+        matched_any: list[Any] = []
         relevant: list[Any] = []
         evidence_ids: list[str] = []
         texts: list[str] = []
         source_types: list[str] = []
+        source_names: set[str] = set()
         direct_count = 0
         indirect_count = 0
         counter_count = 0
         recent_count = 0
 
         for item in evidence_items:
-            if not _get_value(item, "quality_passed", True):
-                continue
             if not _matches_technology(_get_value(item, "technology"), technology):
                 continue
             if not _matches_company(_get_value(item, "company", []), company):
+                continue
+            matched_any.append(item)
+            if not _get_value(item, "quality_passed", True):
                 continue
             relevant.append(item)
             evidence_id = str(_get_value(item, "evidence_id") or _get_value(item, "id") or len(evidence_ids))
@@ -144,6 +147,9 @@ class ThreatAnalysisAgent:
             text = _collect_text(item)
             texts.append(text)
             source_types.append(str(_get_value(item, "source_type", "other")).lower())
+            source_name = str(_get_value(item, "source_name", "")).strip()
+            if source_name:
+                source_names.add(source_name.lower())
             signal_type = str(_get_value(item, "signal_type", "direct")).lower()
             if signal_type == "direct":
                 direct_count += 1
@@ -155,6 +161,11 @@ class ThreatAnalysisAgent:
                 recent_count += 1
 
         profile = get_strategic_overlap_profile(technology, company)
+        data_status = "ok"
+        if not matched_any:
+            data_status = "no_data"
+        elif not relevant:
+            data_status = "coverage_gap"
         impact_score = self._score_axis(texts, _IMPACT_KEYWORDS, profile.score)
         immediacy_score = self._score_axis(texts, _IMMEDIACY_KEYWORDS, 3)
         execution_credibility_score = self._score_execution_credibility(
@@ -186,7 +197,9 @@ class ThreatAnalysisAgent:
             direct_count=direct_count,
             indirect_count=indirect_count,
             counter_count=counter_count,
+            source_diversity=len(source_names),
             has_conflict=conflict[0],
+            data_status=data_status,
         )
         rationale = self._build_rationale(
             impact_score,
@@ -200,6 +213,7 @@ class ThreatAnalysisAgent:
         )
         if self.llm_provider is not None:
             rationale = f"{rationale} | judge={self.llm_provider.generate_text(rationale).text}"
+        trl_evidence_ids = list(getattr(trl_result, "evidence_ids", [])) if trl_result is not None else []
         return ThreatAnalysisResult(
             run_id=run_id,
             technology=technology,
@@ -214,12 +228,13 @@ class ThreatAnalysisAgent:
             rationale=rationale,
             assumptions=list(profile.assumptions),
             evidence_ids=evidence_ids,
-            unresolved=confidence == ConfidenceLevel.LOW or not relevant,
+            unresolved=bool(relevant) and confidence == ConfidenceLevel.LOW and not conflict[0],
+            data_status=data_status,
             has_conflict=conflict[0],
             conflict_type=conflict[1],
             trl_reference_id=(
                 getattr(trl_result, "trl_reference_id", None)
-                or (getattr(trl_result, "evidence_ids", [None])[0] if trl_result else None)
+                or (trl_evidence_ids[0] if trl_evidence_ids else None)
             ),
             threat_reference_id=evidence_ids[0] if evidence_ids else None,
             resolution_notes=conflict[2],
@@ -229,8 +244,9 @@ class ThreatAnalysisAgent:
                 "indirect": indirect_count,
                 "counter": counter_count,
                 "recent": recent_count,
+                "source_diversity": len(source_names),
             },
-            notes=conflict[2] if conflict[2] else [],
+            notes=(conflict[2] if conflict[2] else []) + ([] if data_status == "ok" else [data_status]),
         )
 
     def _score_axis(self, texts: list[str], keyword_table: dict[int, tuple[str, ...]], base: int) -> int:
@@ -316,7 +332,7 @@ class ThreatAnalysisAgent:
         if high_trl and threat_level == ThreatLevel.LOW and strong_overlap:
             notes.append("high_trl_low_threat")
             return True, "coverage_bias", notes, "low"
-        if publicity_only and threat_level == ThreatLevel.HIGH:
+        if publicity_only and (threat_level == ThreatLevel.HIGH or (impact_score >= 3 and immediacy_score >= 3)):
             notes.append("publicity_bias")
             return True, "publicity_bias", notes, "low"
         if getattr(trl_result, "unresolved", False) and threat_level == ThreatLevel.HIGH:
@@ -334,12 +350,18 @@ class ThreatAnalysisAgent:
         direct_count: int,
         indirect_count: int,
         counter_count: int,
+        source_diversity: int,
         has_conflict: bool,
+        data_status: str,
     ) -> ConfidenceLevel:
+        if data_status in {"no_data", "coverage_gap"}:
+            return ConfidenceLevel.LOW
         if has_conflict:
             return ConfidenceLevel.LOW
-        if relevant_count >= 3 and direct_count >= 2 and counter_count == 0:
+        if relevant_count >= 3 and direct_count >= 2 and source_diversity >= 2 and counter_count == 0:
             return ConfidenceLevel.HIGH
+        if relevant_count >= 2 and direct_count >= 1 and source_diversity >= 2 and counter_count <= 1:
+            return ConfidenceLevel.MEDIUM
         if relevant_count >= 1 and direct_count >= 1 and counter_count == 0:
             return ConfidenceLevel.MEDIUM
         if indirect_count and direct_count == 0:

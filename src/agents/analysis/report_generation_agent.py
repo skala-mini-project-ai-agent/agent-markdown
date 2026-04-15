@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -38,6 +39,7 @@ from ...schemas.report_output_schema import (
     ReportStatus,
     ReportWarning,
 )
+from ...retrieval.evidence_retriever import build_claim_text, build_evidence_text, top_k_similar_evidence
 
 
 def _cell_label(item: MergedAnalysisResult | PriorityMatrixRow) -> str:
@@ -70,6 +72,10 @@ def _detect_trl_threat_divergence(merged: MergedAnalysisResult) -> bool:
     return abs(trl_high - threat_numeric) >= TRL_THREAT_DIVERGENCE_THRESHOLD
 
 
+def _has_evidence_backing(item: MergedAnalysisResult) -> bool:
+    return item.data_status == "ok" and bool(item.trl_reference_id or item.threat_reference_id)
+
+
 class ReportGenerationAgent:
     """Synthesizes MergedAnalysisResult + PriorityMatrixRow into a ReportOutput.
 
@@ -83,9 +89,11 @@ class ReportGenerationAgent:
         self,
         output_dir: str | Path = "data/analysis/reports",
         llm_provider: Any | None = None,
+        embedding_provider: Any | None = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.llm_provider = llm_provider
+        self.embedding_provider = embedding_provider
 
     # ------------------------------------------------------------------
     # Public API
@@ -119,15 +127,19 @@ class ReportGenerationAgent:
         md_path = self.output_dir / f"{report_id}.md"
         md_path.write_text(markdown_text, encoding="utf-8")
 
-        html_path = ""
-        if output_format == ReportFormat.HTML:
-            html_text = self._render_html(markdown_text)
-            html_file = self.output_dir / f"{report_id}.html"
-            html_file.write_text(html_text, encoding="utf-8")
-            html_path = str(html_file)
+        html_text = self._render_html(markdown_text)
+        html_file = self.output_dir / f"{report_id}.html"
+        html_file.write_text(html_text, encoding="utf-8")
+        html_path = str(html_file)
 
-        # PDF: placeholder — actual PDF conversion not implemented.
-        pdf_path = str(self.output_dir / f"{report_id}.pdf.placeholder")
+        pdf_file = self.output_dir / f"{report_id}.pdf"
+        pdf_path = self._render_pdf(md_path, pdf_file)
+
+        output_path = str(md_path)
+        if output_format == ReportFormat.HTML:
+            output_path = html_path
+        elif output_format == ReportFormat.PDF and pdf_path:
+            output_path = pdf_path
 
         report = ReportOutput(
             report_id=report_id,
@@ -137,7 +149,7 @@ class ReportGenerationAgent:
             sections=sections,
             reference_trace=reference_trace,
             warnings=warnings,
-            output_path=str(md_path),
+            output_path=output_path,
             html_path=html_path,
             pdf_path=pdf_path,
             created_at=_now_iso(),
@@ -157,7 +169,19 @@ class ReportGenerationAgent:
     ) -> list[ReportWarning]:
         warnings: list[ReportWarning] = []
 
-        unresolved_cells = [_cell_label(m) for m in merged_results if m.unresolved]
+        missing_evidence_cells = [
+            _cell_label(m) for m in merged_results if m.data_status in {"no_data", "coverage_gap"}
+        ]
+        if missing_evidence_cells:
+            warnings.append(
+                ReportWarning(
+                    code=MISSING_EVIDENCE.code,
+                    message=format_warning(MISSING_EVIDENCE, missing_evidence_cells),
+                    affected_cells=missing_evidence_cells,
+                )
+            )
+
+        unresolved_cells = [_cell_label(m) for m in merged_results if m.unresolved and m.data_status == "ok"]
         if unresolved_cells:
             warnings.append(
                 ReportWarning(
@@ -180,7 +204,7 @@ class ReportGenerationAgent:
         low_conf_cells = [
             _cell_label(m)
             for m in merged_results
-            if m.merged_confidence.value == "low" and not m.unresolved
+            if m.merged_confidence.value == "low" and not m.unresolved and m.data_status == "ok"
         ]
         if low_conf_cells:
             warnings.append(
@@ -220,6 +244,7 @@ class ReportGenerationAgent:
             self._section_background(merged_results),
             self._section_technology_status(merged_results, evidence_map),
             self._section_competitor_trends(merged_results, evidence_map),
+            self._section_coverage_gap(merged_results),
             self._section_strategic_implications(priority_matrix),
             self._section_reference(merged_results, evidence_map),
         ]
@@ -230,31 +255,78 @@ class ReportGenerationAgent:
         immediate = [m for m in merged_results if m.priority_bucket == PriorityBucket.IMMEDIATE_PRIORITY]
         strategic = [m for m in merged_results if m.priority_bucket == PriorityBucket.STRATEGIC_WATCH]
         emerging = [m for m in merged_results if m.priority_bucket == PriorityBucket.EMERGING_RISK]
-        unresolved = [m for m in merged_results if m.unresolved]
+        unresolved = [m for m in merged_results if m.unresolved and m.data_status == "ok"]
         conflict = [m for m in merged_results if m.conflict_flag]
+        coverage_gap = [m for m in merged_results if m.data_status in {"no_data", "coverage_gap"}]
 
-        lines: list[str] = []
+        technologies = sorted({m.technology for m in merged_results})
+        companies = sorted({m.company for m in merged_results})
+
+        overview = (
+            f"본 보고서는 {', '.join(technologies)} 축에서 {', '.join(companies)} 관련 evidence를 종합하여 "
+            "기술 성숙도(TRL), 위협 수준, 우선순위 매트릭스를 함께 해석한 결과를 요약한 것입니다. "
+            "핵심 목적은 개별 신호의 사실 여부를 단순 나열하는 것이 아니라, 각 기술-기업 셀의 "
+            "실행 가능성, 시장 파급도, 전략적 중첩도를 함께 보며 대응 우선순위를 정리하는 데 있습니다."
+        )
 
         if immediate:
-            items = ", ".join(f"{m.technology}/{m.company}" for m in immediate)
-            lines.append(f"**즉각 대응 필요 항목**: {items}.")
-        if strategic:
-            items = ", ".join(f"{m.technology}/{m.company}" for m in strategic)
-            lines.append(f"**전략적 감시 필요 항목**: {items}.")
-        if emerging:
-            items = ", ".join(f"{m.technology}/{m.company}" for m in emerging)
-            lines.append(f"**신흥 리스크 항목**: {items}.")
-        if not immediate and not strategic and not emerging:
-            lines.append("현재 즉각 대응이 필요한 고위협 항목은 식별되지 않았습니다.")
+            top_priority = (
+                "즉각 대응이 필요한 고우선순위 항목은 "
+                + ", ".join(f"{m.technology}/{m.company}" for m in immediate)
+                + "로 식별되었습니다. 이 항목들은 상대적으로 높은 위협도 또는 실행 신호를 보이며, "
+                "단기 의사결정과 모니터링 체계에 직접 반영할 필요가 있습니다."
+            )
+        elif strategic:
+            top_priority = (
+                "즉각 대응 수준의 고위협 항목은 제한적이지만, "
+                + ", ".join(f"{m.technology}/{m.company}" for m in strategic)
+                + " 영역은 전략적 감시 대상으로 분류되었습니다. "
+                "즉, 단기 충격보다는 중기 경쟁 구도 변화 가능성에 대비한 추적이 필요합니다."
+            )
+        elif emerging:
+            top_priority = (
+                "현재 관측된 신호는 주로 신흥 리스크 단계에 머물러 있으며, "
+                + ", ".join(f"{m.technology}/{m.company}" for m in emerging)
+                + " 항목이 조기 경보 대상으로 분류되었습니다. "
+                "확정적 결론보다는 후속 evidence 축적과 변화 방향 감지가 중요합니다."
+            )
+        else:
+            top_priority = (
+                "현재 즉각 대응이 필요한 고위협 항목은 식별되지 않았습니다. "
+                "다만 이는 리스크 부재를 의미하지 않으며, 기술별 evidence 밀도와 실행 신호가 아직 제한적일 수 있음을 함께 의미합니다."
+            )
 
+        risk_parts: list[str] = []
         if unresolved:
-            items = ", ".join(_cell_label(m) for m in unresolved)
-            lines.append(f"**미완료 분석 셀** ({items})이 존재하며 추가 검토가 필요합니다.")
+            risk_parts.append(
+                "미완료 분석 셀은 "
+                + ", ".join(_cell_label(m) for m in unresolved)
+                + "이며, 이 구간은 evidence 부족 또는 품질 한계 때문에 해석 신뢰도가 낮습니다."
+            )
         if conflict:
-            items = ", ".join(_cell_label(m) for m in conflict)
-            lines.append(f"**상충 항목** ({items})이 감지되었습니다. 해석 시 주의가 필요합니다.")
+            risk_parts.append(
+                "상충 신호가 감지된 셀은 "
+                + ", ".join(_cell_label(m) for m in conflict)
+                + "이며, 낙관/보수 신호가 동시에 존재하므로 단일 기사나 단일 출처 기준으로 결론을 내리면 왜곡될 수 있습니다."
+            )
+        if coverage_gap:
+            risk_parts.append(
+                "직접 해석에 쓰기 어려운 coverage gap 셀은 "
+                + ", ".join(_cell_label(m) for m in coverage_gap)
+                + "이며, 이 항목들은 본문 핵심 분석보다 별도 보강 대상로 분리했습니다."
+            )
+        if not risk_parts:
+            risk_parts.append(
+                "현재 요약 수준에서는 치명적인 상충 또는 미완료 셀이 두드러지지 않지만, 세부 섹션의 reference trace와 confidence 수준을 함께 확인하는 것이 바람직합니다."
+            )
 
-        body = "\n\n".join(lines)
+        action_focus = (
+            "따라서 본 보고서는 첫째, 우선순위가 높은 기술-기업 셀에 대한 직접 실행 신호를 지속 추적하고, "
+            "둘째, unresolved 또는 low-confidence 셀에 대해서는 추가 검색과 근거 보강을 우선 수행하며, "
+            "셋째, 세부 기술 현황과 경쟁사 동향 섹션을 통해 실제 대응이 필요한 지점을 좁혀 가는 방식으로 활용하는 것이 적절합니다."
+        )
+
+        body = "\n\n".join([overview, top_priority, *risk_parts, action_focus])
         return ReportSection(section_id="summary", title="SUMMARY", body=body)
 
     def _section_background(
@@ -287,7 +359,7 @@ class ReportGenerationAgent:
 
         for tech in sorted({m.technology for m in merged_results}):
             tech_items = sorted(
-                [m for m in merged_results if m.technology == tech],
+                [m for m in merged_results if m.technology == tech and _has_evidence_backing(m)],
                 key=lambda m: m.company,
             )
             lines: list[str] = []
@@ -343,7 +415,7 @@ class ReportGenerationAgent:
         header_lines = [
             TRL_LIMITATION_NOTICE,
             "",
-            "각 기술 축별 TRL 수준 분석 결과는 아래와 같습니다.",
+            "각 기술 축별 TRL 수준 분석 결과는 evidence-backed 셀 중심으로 정리했습니다.",
         ]
         return ReportSection(
             section_id="technology_status",
@@ -363,7 +435,7 @@ class ReportGenerationAgent:
 
         for company in sorted({m.company for m in merged_results}):
             company_items = sorted(
-                [m for m in merged_results if m.company == company],
+                [m for m in merged_results if m.company == company and _has_evidence_backing(m)],
                 key=lambda m: m.technology,
             )
             lines: list[str] = []
@@ -414,7 +486,7 @@ class ReportGenerationAgent:
         header_lines = [
             THREAT_COMPOSITE_NOTICE,
             "",
-            "기업별 위협 수준 및 동향 분석 결과는 아래와 같습니다.",
+            "기업별 위협 수준 및 동향 분석 결과는 evidence-backed 셀 중심으로 정리했습니다.",
         ]
         return ReportSection(
             section_id="competitor_trends",
@@ -468,6 +540,34 @@ class ReportGenerationAgent:
             section_id="strategic_implications",
             title="전략적 시사점",
             body=body,
+        )
+
+    def _section_coverage_gap(
+        self,
+        merged_results: Sequence[MergedAnalysisResult],
+    ) -> ReportSection:
+        gap_items = [m for m in merged_results if m.data_status in {"no_data", "coverage_gap"}]
+        if not gap_items:
+            body = "별도로 분리할 coverage gap 셀이 없습니다."
+            return ReportSection(section_id="coverage_gap", title="Coverage Gap", body=body)
+
+        lines = [
+            "아래 셀은 본문 핵심 분석에서 제외하고 근거 보강 대상으로 분리했습니다.",
+            "",
+        ]
+        for item in sorted(gap_items, key=lambda m: (m.technology, m.company)):
+            if item.data_status == "no_data":
+                detail = "매칭 evidence가 없습니다."
+            else:
+                detail = "매칭 evidence는 있었지만 quality gate를 통과하지 못했습니다."
+            lines.append(
+                f"- **{item.technology}/{item.company}**: status={item.data_status}, "
+                f"신뢰도={item.merged_confidence.value}. {detail} 후속 검색 및 검증이 필요합니다."
+            )
+        return ReportSection(
+            section_id="coverage_gap",
+            title="Coverage Gap",
+            body="\n".join(lines),
         )
 
     def _section_reference(
@@ -556,7 +656,58 @@ class ReportGenerationAgent:
                         )
                     )
 
+            if m.trl_reference_id or m.threat_reference_id:
+                continue
+            traces.extend(self._semantic_reference_trace(m, evidence_map, seen))
+
         return sorted(traces, key=lambda t: (t.claim_id, t.evidence_id))
+
+    def _semantic_reference_trace(
+        self,
+        merged: MergedAnalysisResult,
+        evidence_map: dict[str, NormalizedEvidence],
+        seen: set[tuple[str, str]],
+    ) -> list[EvidenceTrace]:
+        if self.embedding_provider is None or not evidence_map or not hasattr(self.embedding_provider, "embed_texts"):
+            return []
+        claim_text = build_claim_text(merged)
+        claim_vector = self.embedding_provider.embed_texts([claim_text], task="retrieval.query")[0]
+        evidence_items = list(evidence_map.values())
+        for item in evidence_items:
+            if "embedding" not in item.metadata:
+                item.metadata["embedding"] = self.embedding_provider.embed_texts(
+                    [build_evidence_text(item)],
+                    task="retrieval.passage",
+                )[0]
+        ranked = top_k_similar_evidence(
+            claim_vector,
+            evidence_items,
+            technology=merged.technology,
+            company=merged.company,
+            top_k=2,
+        )
+        traces: list[EvidenceTrace] = []
+        for claim_prefix in ("trl", "threat"):
+            claim_id = f"{claim_prefix}-{merged.technology}-{merged.company}".replace(" ", "_").lower()
+            for item, score in ranked:
+                if score <= 0:
+                    continue
+                key = (claim_id, item.evidence_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                traces.append(
+                    EvidenceTrace(
+                        claim_id=claim_id,
+                        evidence_id=item.evidence_id,
+                        source_name=item.source_name,
+                        url=item.url,
+                        published_at=item.published_at,
+                        quote=(item.raw_content[:300] if item.raw_content else ""),
+                    )
+                )
+                break
+        return traces
 
     # ------------------------------------------------------------------
     # Rendering
@@ -606,6 +757,36 @@ class ReportGenerationAgent:
             + "</pre></body></html>"
         )
 
+    def _render_pdf(self, text_file: Path, pdf_file: Path) -> str:
+        try:
+            subprocess.run(
+                [
+                    "/opt/homebrew/bin/pango-view",
+                    "--no-display",
+                    "--font=Apple SD Gothic Neo 11",
+                    "--margin=36",
+                    "--output",
+                    str(pdf_file),
+                    str(text_file),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            if pdf_file.exists() and pdf_file.stat().st_size > 0:
+                return str(pdf_file)
+        except (OSError, subprocess.CalledProcessError):
+            pass
+        try:
+            result = subprocess.run(
+                ["/usr/sbin/cupsfilter", "-m", "application/pdf", str(text_file)],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return ""
+        pdf_file.write_bytes(result.stdout)
+        return str(pdf_file)
+
     # ------------------------------------------------------------------
     # Status determination
     # ------------------------------------------------------------------
@@ -615,7 +796,11 @@ class ReportGenerationAgent:
         merged_results: Sequence[MergedAnalysisResult],
         warnings: list[ReportWarning],
     ) -> ReportStatus:
-        if all(m.unresolved for m in merged_results):
+        if merged_results and all(m.unresolved for m in merged_results):
+            return ReportStatus.BLOCKED
+        if all(m.data_status == "no_data" for m in merged_results):
+            return ReportStatus.BLOCKED
+        if all(m.data_status in {"no_data", "coverage_gap"} for m in merged_results):
             return ReportStatus.BLOCKED
         if any(w.code in ("UNRESOLVED_CELL", "CONFLICT_FLAG") for w in warnings):
             return ReportStatus.WARNING

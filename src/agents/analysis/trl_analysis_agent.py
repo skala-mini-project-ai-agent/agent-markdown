@@ -121,6 +121,7 @@ class TRLAnalysisAgent:
         evidence_items: Iterable[Any],
         quality_report: Any | None = None,
     ) -> TRLAnalysisResult:
+        matched_any: list[Any] = []
         relevant: list[Any] = []
         direct_ids: list[str] = []
         indirect_ids: list[str] = []
@@ -128,17 +129,22 @@ class TRLAnalysisAgent:
         direct_scores: list[int] = []
         indirect_scores: list[int] = []
         counter_scores: list[int] = []
+        source_names: set[str] = set()
 
         for item in evidence_items:
-            if not _get_value(item, "quality_passed", True):
-                continue
             if not _matches_technology(_get_value(item, "technology"), technology):
                 continue
             if not _matches_company(_get_value(item, "company", []), company):
                 continue
+            matched_any.append(item)
+            if not _get_value(item, "quality_passed", True):
+                continue
             relevant.append(item)
             evidence_id = str(_get_value(item, "evidence_id") or _get_value(item, "id") or len(evidence_ids))
             evidence_ids.append(evidence_id)
+            source_name = str(_get_value(item, "source_name", "")).strip()
+            if source_name:
+                source_names.add(source_name.lower())
 
             text = _extract_text(item)
             signal_type = str(_get_value(item, "signal_type", "direct")).lower()
@@ -162,12 +168,14 @@ class TRLAnalysisAgent:
             run_id=run_id,
             technology=technology,
             company=company,
+            matched_count=len(matched_any),
             direct_ids=direct_ids,
             indirect_ids=indirect_ids,
             evidence_ids=evidence_ids,
             direct_scores=direct_scores,
             indirect_scores=indirect_scores,
             counter_scores=counter_scores,
+            source_diversity=len(source_names),
             quality_report=quality_report,
         )
         return result
@@ -178,12 +186,14 @@ class TRLAnalysisAgent:
         run_id: str,
         technology: str,
         company: str,
+        matched_count: int,
         direct_ids: list[str],
         indirect_ids: list[str],
         evidence_ids: list[str],
         direct_scores: list[int],
         indirect_scores: list[int],
         counter_scores: list[int],
+        source_diversity: int,
         quality_report: Any | None,
     ) -> TRLAnalysisResult:
         best_direct = max(direct_scores, default=0)
@@ -191,25 +201,39 @@ class TRLAnalysisAgent:
         counter_penalty = 1 if max(counter_scores, default=0) >= 6 else 0
 
         if best_direct == 0 and best_indirect == 0:
+            data_status = "no_data" if matched_count == 0 else "coverage_gap"
+            rationale = (
+                "No evidence matched the technology/company cell."
+                if data_status == "no_data"
+                else "Matched evidence exists, but none passed the quality gate for this cell."
+            )
             return TRLAnalysisResult(
                 run_id=run_id,
                 technology=technology,
                 company=company,
-                trl_range="unresolved",
+                trl_range=data_status,
                 trl_score_low=None,
                 trl_score_high=None,
                 confidence=ConfidenceLevel.LOW,
-                rationale="No quality-passed evidence matched the technology/company cell.",
+                rationale=rationale,
                 direct_evidence_ids=[],
                 indirect_evidence_ids=[],
                 evidence_ids=[],
-                unresolved=True,
+                unresolved=False,
+                data_status=data_status,
                 quality_passed=bool(getattr(quality_report, "analysis_ready", True)),
                 signal_summary={"direct": 0, "indirect": 0, "counter": 0},
-                notes=["evidence_missing"],
+                notes=[data_status],
             )
 
-        low, high, confidence, notes = self._infer_range(best_direct, best_indirect, counter_penalty, direct_ids, indirect_ids)
+        low, high, confidence, notes = self._infer_range(
+            best_direct,
+            best_indirect,
+            counter_penalty,
+            direct_ids,
+            indirect_ids,
+            source_diversity,
+        )
         if low is None or high is None:
             return TRLAnalysisResult(
                 run_id=run_id,
@@ -224,6 +248,7 @@ class TRLAnalysisAgent:
                 indirect_evidence_ids=indirect_ids,
                 evidence_ids=evidence_ids,
                 unresolved=True,
+                data_status="ok",
                 quality_passed=bool(getattr(quality_report, "analysis_ready", True)),
                 signal_summary={"direct": len(direct_ids), "indirect": len(indirect_ids), "counter": len(counter_scores)},
                 notes=notes or ["insufficient_strength"],
@@ -246,6 +271,7 @@ class TRLAnalysisAgent:
             indirect_evidence_ids=indirect_ids,
             evidence_ids=evidence_ids,
             unresolved=False,
+            data_status="ok",
             quality_passed=bool(getattr(quality_report, "analysis_ready", True)),
             signal_summary={"direct": len(direct_ids), "indirect": len(indirect_ids), "counter": len(counter_scores)},
             notes=notes,
@@ -258,6 +284,7 @@ class TRLAnalysisAgent:
         counter_penalty: int,
         direct_ids: list[str],
         indirect_ids: list[str],
+        source_diversity: int,
     ) -> tuple[int | None, int | None, ConfidenceLevel, list[str]]:
         notes: list[str] = []
         if direct_score >= 8:
@@ -265,27 +292,43 @@ class TRLAnalysisAgent:
             if len(direct_ids) == 1:
                 high = 8
                 notes.append("single_direct_confirmation")
+                confidence = ConfidenceLevel.MEDIUM
+            if source_diversity < 2:
+                notes.append("limited_source_diversity")
+                confidence = ConfidenceLevel.MEDIUM
             return max(1, low - counter_penalty), max(1, high - counter_penalty), confidence, notes
         if direct_score == 7:
-            confidence = ConfidenceLevel.HIGH if len(direct_ids) >= 2 else ConfidenceLevel.MEDIUM
+            confidence = ConfidenceLevel.HIGH if len(direct_ids) >= 2 and source_diversity >= 2 else ConfidenceLevel.MEDIUM
+            if source_diversity < 2:
+                notes.append("limited_source_diversity")
             return max(1, 7 - counter_penalty), max(1, 8 - counter_penalty), confidence, notes
         if direct_score == 6:
-            confidence = ConfidenceLevel.MEDIUM if indirect_score else ConfidenceLevel.HIGH
+            confidence = ConfidenceLevel.MEDIUM if indirect_score or source_diversity < 2 else ConfidenceLevel.HIGH
+            if source_diversity < 2:
+                notes.append("limited_source_diversity")
             return max(1, 6 - counter_penalty), max(1, 7 - counter_penalty), confidence, notes
         if direct_score == 5:
-            confidence = ConfidenceLevel.MEDIUM
+            confidence = ConfidenceLevel.MEDIUM if source_diversity >= 2 else ConfidenceLevel.LOW
+            if source_diversity < 2:
+                notes.append("limited_source_diversity")
             return max(1, 5 - counter_penalty), max(1, 6 - counter_penalty), confidence, notes
         if direct_score == 4:
             confidence = ConfidenceLevel.LOW
             return max(1, 4 - counter_penalty), max(1, 5 - counter_penalty), confidence, notes
         if indirect_score >= 6:
             notes.append("indirect_only")
+            if source_diversity < 2:
+                notes.append("limited_source_diversity")
             return 4, 6, ConfidenceLevel.LOW, notes
         if indirect_score == 5:
             notes.append("indirect_only")
+            if source_diversity < 2:
+                notes.append("limited_source_diversity")
             return 4, 5, ConfidenceLevel.LOW, notes
         if indirect_score == 4:
             notes.append("indirect_only")
+            if source_diversity < 2:
+                notes.append("limited_source_diversity")
             return 3, 5, ConfidenceLevel.LOW, notes
         return None, None, ConfidenceLevel.LOW, ["weak_signal"]
 
@@ -309,4 +352,3 @@ class TRLAnalysisAgent:
         if counter_penalty:
             parts.append("counter_signal_present")
         return "; ".join(parts)
-

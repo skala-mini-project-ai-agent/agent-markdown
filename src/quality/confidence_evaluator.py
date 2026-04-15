@@ -24,7 +24,12 @@ def evaluate_low_confidence_cells(
     for (technology, company), items in buckets.items():
         confidence_counts = Counter(item.confidence for item in items)
         avg_score = sum(CONFIDENCE_ORDER.get(item.confidence, 2) for item in items) / len(items)
-        if len(items) < threshold or avg_score < 2:
+        source_diversity = len({item.source_name for item in items if item.source_name})
+        direct_count = sum(1 for item in items if item.signal_type == "direct")
+        indirect_count = sum(1 for item in items if item.signal_type == "indirect")
+        if len(items) < threshold:
+            continue
+        if avg_score < 2 or direct_count == 0 or source_diversity < 2:
             low_cells.append(
                 {
                     "technology": technology,
@@ -32,7 +37,9 @@ def evaluate_low_confidence_cells(
                     "count": len(items),
                     "average_confidence": avg_score,
                     "confidence_counts": dict(confidence_counts),
+                    "source_diversity": source_diversity,
+                    "direct_count": direct_count,
+                    "indirect_count": indirect_count,
                 }
             )
     return low_cells
-

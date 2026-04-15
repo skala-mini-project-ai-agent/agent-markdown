@@ -39,7 +39,30 @@ class EvidenceNormalizerTest(unittest.TestCase):
         self.assertFalse(normalized.unresolved)
         self.assertGreaterEqual(len(normalized.key_points), 1)
 
+    def test_normalize_finding_marks_failed_local_validation_unresolved(self) -> None:
+        finding = RawFinding(
+            raw_finding_id="run-1:pim:2",
+            run_id="run-1",
+            agent_type="pim",
+            query="PIM architecture",
+            title="PIM architecture update",
+            source_type="news",
+            signal_type="direct",
+            source_name="Example Source",
+            published_at="2025-01-15T00:00:00Z",
+            url="https://example.invalid/pim/2",
+            raw_content="PIM architecture update.",
+            company=["SK hynix"],
+            technology="PIM",
+            confidence="medium",
+            local_validation={"passed": False},
+        )
+
+        normalized = EvidenceNormalizer().normalize_finding(finding)
+
+        self.assertFalse(normalized.quality_passed)
+        self.assertTrue(normalized.unresolved)
+
 
 if __name__ == "__main__":
     unittest.main()
-

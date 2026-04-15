@@ -16,9 +16,12 @@ from src.agents.search.pim_search_agent import PIMSearchAgent
 from src.agents.search.thermal_power_agent import ThermalPowerSearchAgent
 from src.normalization.evidence_loader import EvidenceLoader
 from src.normalization.evidence_normalizer import EvidenceNormalizer
+from src.providers.embedding.base_embedding_provider import BaseEmbeddingProvider
+from src.providers.embedding.noop_embedding_provider import NoopEmbeddingProvider
 from src.providers.search.base_search_provider import BaseSearchProvider
 from src.providers.search.deterministic_search_provider import DeterministicSearchProvider
 from src.quality.quality_gate import QualityGate
+from src.retrieval.evidence_retriever import attach_embeddings
 from src.schemas.normalized_evidence_schema import NormalizedEvidence
 from src.schemas.quality_report_schema import QualityReport
 from src.schemas.raw_result_schema import RawSearchBundle
@@ -50,6 +53,7 @@ class ParallelSearchRunner:
         agents: dict[str, Any] | None = None,
         *,
         provider: BaseSearchProvider | None = None,
+        embedding_provider: BaseEmbeddingProvider | None = None,
         raw_repository: RawFindingRepository | None = None,
         normalized_repository: NormalizedEvidenceRepository | None = None,
         quality_repository: QualityReportRepository | None = None,
@@ -58,6 +62,7 @@ class ParallelSearchRunner:
         loader: EvidenceLoader | None = None,
     ) -> None:
         self.provider = provider or DeterministicSearchProvider()
+        self.embedding_provider = embedding_provider or NoopEmbeddingProvider()
         self.agents = agents or self._default_agents()
         self.raw_repository = raw_repository or RawFindingRepository()
         self.normalized_repository = normalized_repository or NormalizedEvidenceRepository()
@@ -96,6 +101,7 @@ class ParallelSearchRunner:
             if not agent_status.bundle:
                 continue
             normalized.extend(self.normalizer.normalize_bundle(agent_status.bundle))
+        attach_embeddings(normalized, embedding_provider=self.embedding_provider)
         self.loader.load(normalized)
         quality_report = self.quality_gate.evaluate(context.run_id, normalized)
         self.quality_repository.save(quality_report)

@@ -33,6 +33,7 @@ def _merged(
     conflict_flag: bool = False,
     priority_bucket: PriorityBucket = PriorityBucket.STRATEGIC_WATCH,
     unresolved: bool = False,
+    data_status: str = "ok",
     trl_ref: str | None = "ev-001",
     threat_ref: str | None = "ev-002",
 ) -> MergedAnalysisResult:
@@ -47,6 +48,7 @@ def _merged(
         priority_bucket=priority_bucket,
         action_hint="Monitor strategically.",
         unresolved=unresolved,
+        data_status=data_status,
         trl_reference_id=trl_ref,
         threat_reference_id=threat_ref,
     )
@@ -66,6 +68,7 @@ def _priority_row(merged: MergedAnalysisResult) -> PriorityMatrixRow:
         trl_reference_id=merged.trl_reference_id,
         threat_reference_id=merged.threat_reference_id,
         unresolved=merged.unresolved,
+        data_status=merged.data_status,
     )
 
 
@@ -131,6 +134,35 @@ def test_section_order_is_deterministic(tmp_path: Path):
     ids1 = [s.section_id for s in report1.sections]
     ids2 = [s.section_id for s in report2.sections]
     assert ids1 == ids2
+
+
+def test_summary_section_contains_executive_overview(tmp_path: Path):
+    agent = _make_agent(tmp_path)
+    m1 = _merged(company="CompanyA", priority_bucket=PriorityBucket.IMMEDIATE_PRIORITY)
+    m2 = _merged(
+        technology="PIM",
+        company="CompanyB",
+        priority_bucket=PriorityBucket.STRATEGIC_WATCH,
+        unresolved=True,
+        trl_ref="ev-003",
+        threat_ref="ev-004",
+    )
+    report = agent.generate(
+        run_id="run-test",
+        merged_results=[m1, m2],
+        priority_matrix=[_priority_row(m1), _priority_row(m2)],
+        evidence_items=[
+            _evidence("ev-001"),
+            _evidence("ev-002", "Other content."),
+            _evidence("ev-003", "Third content."),
+            _evidence("ev-004", "Fourth content."),
+        ],
+    )
+    summary = next(s for s in report.sections if s.section_id == "summary")
+    assert "본 보고서는" in summary.body
+    assert "즉각 대응" in summary.body or "전략적 감시" in summary.body
+    assert "추가 검색과 근거 보강" in summary.body
+    assert len(summary.body) >= 300
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +251,23 @@ def test_conflict_warning_generated(tmp_path: Path):
     assert "CONFLICT_FLAG" in codes
 
 
+def test_missing_evidence_warning_generated_for_coverage_gap(tmp_path: Path):
+    agent = _make_agent(tmp_path)
+    m = _merged(
+        data_status="coverage_gap",
+        trl_ref=None,
+        threat_ref=None,
+        priority_bucket=PriorityBucket.REVIEW_REQUIRED,
+    )
+    report = agent.generate(
+        run_id="run-test",
+        merged_results=[m],
+        priority_matrix=[_priority_row(m)],
+    )
+    codes = {w.code for w in report.warnings}
+    assert "MISSING_EVIDENCE" in codes
+
+
 # ---------------------------------------------------------------------------
 # Tests: TRL-Threat divergence
 # ---------------------------------------------------------------------------
@@ -305,15 +354,42 @@ def test_html_output_file_created(tmp_path: Path):
     assert Path(report.html_path).exists()
 
 
-def test_pdf_placeholder_path_set(tmp_path: Path):
+def test_pdf_output_file_created(tmp_path: Path):
     agent = _make_agent(tmp_path)
     m = _merged()
     report = agent.generate(
         run_id="run-test",
         merged_results=[m],
         priority_matrix=[_priority_row(m)],
+        output_format=ReportFormat.PDF,
     )
-    assert report.pdf_path.endswith(".pdf.placeholder")
+    assert report.pdf_path.endswith(".pdf")
+    assert Path(report.pdf_path).exists()
+    assert Path(report.output_path).suffix == ".pdf"
+
+
+def test_coverage_gap_section_collects_evidence_poor_cells(tmp_path: Path):
+    agent = _make_agent(tmp_path)
+    ready = _merged(company="CompanyA")
+    gap = _merged(
+        company="CompanyB",
+        data_status="coverage_gap",
+        trl_ref=None,
+        threat_ref=None,
+        priority_bucket=PriorityBucket.REVIEW_REQUIRED,
+    )
+    report = agent.generate(
+        run_id="run-test",
+        merged_results=[ready, gap],
+        priority_matrix=[_priority_row(ready), _priority_row(gap)],
+        evidence_items=[_evidence("ev-001"), _evidence("ev-002", "Other content.")],
+    )
+    coverage_section = next(s for s in report.sections if s.section_id == "coverage_gap")
+    assert "HBM4/CompanyB" in coverage_section.body
+
+    tech_section = next(s for s in report.sections if s.section_id == "technology_status")
+    full_sub_text = " ".join(sub.body for sub in tech_section.subsections)
+    assert "CompanyB" not in full_sub_text
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +419,23 @@ def test_status_blocked_when_all_unresolved(tmp_path: Path):
     """When every merged result is unresolved, the report is BLOCKED (no usable analysis)."""
     agent = _make_agent(tmp_path)
     m = _merged(unresolved=True, priority_bucket=PriorityBucket.REVIEW_REQUIRED)
+    report = agent.generate(
+        run_id="run-test",
+        merged_results=[m],
+        priority_matrix=[_priority_row(m)],
+    )
+    assert report.status == ReportStatus.BLOCKED
+
+
+def test_status_blocked_when_all_cells_are_coverage_gap(tmp_path: Path):
+    agent = _make_agent(tmp_path)
+    m = _merged(
+        data_status="coverage_gap",
+        unresolved=False,
+        trl_ref=None,
+        threat_ref=None,
+        priority_bucket=PriorityBucket.REVIEW_REQUIRED,
+    )
     report = agent.generate(
         run_id="run-test",
         merged_results=[m],

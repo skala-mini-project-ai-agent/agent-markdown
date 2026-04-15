@@ -38,6 +38,10 @@ def _priority_bucket(trl_result: TRLAnalysisResult, threat_result: ThreatAnalysi
     trl_score = _trl_score(trl_result)
     overlap = threat_result.strategic_overlap_score
     execution = threat_result.execution_credibility_score
+    if trl_result.data_status == "no_data" or threat_result.data_status == "no_data":
+        return PriorityBucket.REVIEW_REQUIRED, "No matched evidence was found for this cell. Expand coverage before drawing conclusions."
+    if trl_result.data_status == "coverage_gap" or threat_result.data_status == "coverage_gap":
+        return PriorityBucket.REVIEW_REQUIRED, "Evidence matched this cell but failed quality checks. Fill the coverage gap before escalation."
     if conflict_flag or trl_result.unresolved or threat_result.unresolved:
         return PriorityBucket.REVIEW_REQUIRED, "Resolve unresolved or conflicting analysis before report generation."
     if threat_result.threat_level == ThreatLevel.HIGH and trl_score >= 7 and overlap >= 4:
@@ -53,11 +57,22 @@ def _priority_bucket(trl_result: TRLAnalysisResult, threat_result: ThreatAnalysi
 
 def _merged_confidence(trl_result: TRLAnalysisResult, threat_result: ThreatAnalysisResult, conflict_flag: bool) -> ConfidenceLevel:
     confidence = combine_confidence(trl_result.confidence, threat_result.confidence)
+    if trl_result.data_status != "ok" or threat_result.data_status != "ok":
+        return ConfidenceLevel.LOW
     if conflict_flag:
         return ConfidenceLevel.LOW
     if trl_result.unresolved or threat_result.unresolved:
         return ConfidenceLevel.LOW
     return confidence
+
+
+def _merged_data_status(trl_result: TRLAnalysisResult, threat_result: ThreatAnalysisResult) -> str:
+    statuses = {trl_result.data_status, threat_result.data_status}
+    if "no_data" in statuses:
+        return "no_data"
+    if "coverage_gap" in statuses:
+        return "coverage_gap"
+    return "ok"
 
 
 def merge_analysis_results(
@@ -80,7 +95,8 @@ def merge_analysis_results(
     for key in sorted(trl_keys):
         trl_result = trl_map[key]
         threat_result = threat_map[key]
-        conflict_flag = bool(trl_result.unresolved or threat_result.has_conflict or threat_result.unresolved)
+        data_status = _merged_data_status(trl_result, threat_result)
+        conflict_flag = bool(threat_result.has_conflict)
         priority_bucket, action_hint = _priority_bucket(trl_result, threat_result, conflict_flag)
         merged_confidence = _merged_confidence(trl_result, threat_result, conflict_flag)
         merged = MergedAnalysisResult(
@@ -94,6 +110,7 @@ def merge_analysis_results(
             priority_bucket=priority_bucket,
             action_hint=action_hint,
             unresolved=trl_result.unresolved or threat_result.unresolved,
+            data_status=data_status,
             trl_reference_id=trl_result.evidence_ids[0] if trl_result.evidence_ids else None,
             threat_reference_id=threat_result.evidence_ids[0] if threat_result.evidence_ids else None,
             conflict_reference_id=threat_result.threat_reference_id if threat_result.has_conflict else None,
@@ -114,7 +131,7 @@ def merge_analysis_results(
                 trl_reference_id=merged.trl_reference_id,
                 threat_reference_id=merged.threat_reference_id,
                 unresolved=merged.unresolved,
+                data_status=merged.data_status,
             )
         )
     return merged_results, priority_rows
-

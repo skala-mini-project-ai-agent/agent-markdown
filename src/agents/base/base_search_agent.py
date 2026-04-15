@@ -24,23 +24,34 @@ class BaseSearchAgent(BaseAgent, ABC):
     def build_queries(self, context: SearchExecutionContext) -> list[SearchQuery]:
         queries: list[SearchQuery] = []
         terms = list(self.focus_terms)
+        retry_hints = self._retry_hints(context)
+        source_hints = self._source_hints_for_retry(retry_hints)
         if terms:
             for term in terms[:3]:
                 queries.append(
                     SearchQuery(
-                        query=f"{context.user_query or self.technology} {term}".strip(),
+                        query=self._compose_query(context, term, retry_hints),
                         technology=self.technology,
-                        source_hints=["news", "press_release", "paper"],
-                        metadata={"term": term, "agent_type": self.agent_type},
+                        source_hints=source_hints,
+                        metadata={
+                            "term": term,
+                            "agent_type": self.agent_type,
+                            "retry_hints": retry_hints,
+                            "retry_attempt": context.metadata.get("retry_attempt", 0),
+                        },
                     )
                 )
         else:
             queries.append(
                 SearchQuery(
-                    query=context.user_query or self.technology,
+                    query=self._compose_query(context, None, retry_hints),
                     technology=self.technology,
-                    source_hints=["news", "press_release"],
-                    metadata={"agent_type": self.agent_type},
+                    source_hints=source_hints,
+                    metadata={
+                        "agent_type": self.agent_type,
+                        "retry_hints": retry_hints,
+                        "retry_attempt": context.metadata.get("retry_attempt", 0),
+                    },
                 )
             )
         return queries
@@ -116,4 +127,71 @@ class BaseSearchAgent(BaseAgent, ABC):
         queries = self.build_queries(context)
         raw_findings = self.search(queries, context)
         validation = self.local_validate(raw_findings)
+        self._propagate_validation(raw_findings, validation)
         return self.to_raw_bundle(context=context, queries=queries, raw_findings=raw_findings, validation=validation)
+
+    def _retry_hints(self, context: SearchExecutionContext) -> list[dict[str, Any]]:
+        retry_plan = context.metadata.get("retry_plan", {})
+        retry_targets = retry_plan.get("retry_targets", []) if isinstance(retry_plan, dict) else []
+        return [target for target in retry_targets if target.get("agent") == self.agent_type]
+
+    def _compose_query(
+        self,
+        context: SearchExecutionContext,
+        term: str | None,
+        retry_hints: list[dict[str, Any]],
+    ) -> str:
+        base = f"{context.user_query or self.technology} {term or ''}".strip()
+        if not retry_hints:
+            return base
+        retry_terms: list[str] = []
+        for hint in retry_hints:
+            reason = str(hint.get("reason", ""))
+            if reason == "low_confidence":
+                retry_terms.append("validated benchmark customer qualification")
+            elif "conflict" in reason:
+                retry_terms.append("independent confirmation rebuttal evidence")
+            elif "bias" in reason:
+                retry_terms.append("independent analyst paper standards consortium")
+            else:
+                retry_terms.append("additional evidence cross source verification")
+            retry_terms.extend(str(term) for term in hint.get("expansion_terms", []))
+        suffix = " ".join(dict.fromkeys(retry_terms))
+        return f"{base} {suffix}".strip()
+
+    def _source_hints_for_retry(self, retry_hints: list[dict[str, Any]]) -> list[str]:
+        hints = ["news", "press_release", "paper"]
+        reasons = {str(hint.get("reason", "")) for hint in retry_hints}
+        if any("conflict" in reason for reason in reasons):
+            hints.extend(["paper", "filing"])
+        if "company_bias" in reasons:
+            hints.extend(["conference", "patent"])
+        if "low_confidence" in reasons:
+            hints.extend(["paper", "conference"])
+        return list(dict.fromkeys(hints))
+
+    def _propagate_validation(
+        self,
+        raw_findings: list[RawFinding],
+        validation: AgentValidationResult,
+    ) -> None:
+        urls = [finding.url for finding in raw_findings if finding.url]
+        duplicate_urls = {url for url, count in Counter(urls).items() if count > 1}
+        for finding in raw_findings:
+            missing_fields = []
+            if not finding.title:
+                missing_fields.append("title")
+            if not finding.url:
+                missing_fields.append("url")
+            if not finding.published_at:
+                missing_fields.append("published_at")
+            if not finding.raw_content:
+                missing_fields.append("raw_content")
+            finding.local_validation = {
+                "passed": validation.passed and not missing_fields and finding.url not in duplicate_urls,
+                "bundle_passed": validation.passed,
+                "bundle_warnings": list(validation.warnings),
+                "missing_fields": missing_fields,
+                "duplicate_url": finding.url in duplicate_urls if finding.url else False,
+                "source_name_present": bool(finding.source_name),
+            }

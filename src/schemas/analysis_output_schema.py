@@ -47,6 +47,7 @@ class TRLAnalysisResult:
     indirect_evidence_ids: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     unresolved: bool = False
+    data_status: str = "ok"
     quality_passed: bool = True
     signal_summary: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -72,6 +73,7 @@ class TRLAnalysisResult:
             indirect_evidence_ids=list(data.get("indirect_evidence_ids", [])),
             evidence_ids=list(data.get("evidence_ids", [])),
             unresolved=bool(data.get("unresolved", False)),
+            data_status=data.get("data_status", "ok"),
             quality_passed=bool(data.get("quality_passed", True)),
             signal_summary=dict(data.get("signal_summary", {})),
             notes=list(data.get("notes", [])),
@@ -94,6 +96,7 @@ class ThreatAnalysisResult:
     assumptions: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     unresolved: bool = False
+    data_status: str = "ok"
     has_conflict: bool = False
     conflict_type: str | None = None
     trl_reference_id: str | None = None
@@ -130,6 +133,7 @@ class ThreatAnalysisResult:
             assumptions=list(data.get("assumptions", [])),
             evidence_ids=list(data.get("evidence_ids", [])),
             unresolved=bool(data.get("unresolved", False)),
+            data_status=data.get("data_status", "ok"),
             has_conflict=bool(data.get("has_conflict", False)),
             conflict_type=data.get("conflict_type"),
             trl_reference_id=data.get("trl_reference_id"),
@@ -190,6 +194,7 @@ class PriorityMatrixRow:
     trl_reference_id: str | None = None
     threat_reference_id: str | None = None
     unresolved: bool = False
+    data_status: str = "ok"
 
     def key(self) -> tuple[str, str, str]:
         return self.run_id, self.technology, self.company
@@ -216,6 +221,7 @@ class PriorityMatrixRow:
             trl_reference_id=data.get("trl_reference_id"),
             threat_reference_id=data.get("threat_reference_id"),
             unresolved=bool(data.get("unresolved", False)),
+            data_status=data.get("data_status", "ok"),
         )
 
 
@@ -231,6 +237,7 @@ class MergedAnalysisResult:
     priority_bucket: PriorityBucket
     action_hint: str
     unresolved: bool = False
+    data_status: str = "ok"
     trl_reference_id: str | None = None
     threat_reference_id: str | None = None
     conflict_reference_id: str | None = None
@@ -259,6 +266,7 @@ class MergedAnalysisResult:
             priority_bucket=PriorityBucket(data["priority_bucket"]),
             action_hint=data["action_hint"],
             unresolved=bool(data.get("unresolved", False)),
+            data_status=data.get("data_status", "ok"),
             trl_reference_id=data.get("trl_reference_id"),
             threat_reference_id=data.get("threat_reference_id"),
             conflict_reference_id=data.get("conflict_reference_id"),
@@ -287,4 +295,3 @@ def combine_confidence(*values: ConfidenceLevel) -> ConfidenceLevel:
 
 def result_key(result: Any) -> tuple[str, str, str]:
     return result.run_id, result.technology, result.company
-

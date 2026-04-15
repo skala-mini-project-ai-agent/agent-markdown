@@ -62,3 +62,57 @@ def test_merge_node_raises_on_key_mismatch():
 
     with pytest.raises(AnalysisMergeError):
         merge_analysis_results([trl], [threat])
+
+
+def test_merge_node_preserves_coverage_gap_without_forcing_conflict():
+    trl = TRLAnalysisAgent().analyze(
+        run_id="r1",
+        technology="HBM4",
+        company="Company A",
+        evidence_items=[
+            {
+                "evidence_id": "e1",
+                "run_id": "r1",
+                "technology": "HBM4",
+                "company": ["Company A"],
+                "title": "Qualification progress",
+                "signal_type": "direct",
+                "source_type": "news",
+                "published_at": "2025-01-01T00:00:00Z",
+                "raw_content": "qualification",
+                "key_points": ["qualification"],
+                "signals": [],
+                "counter_signals": [],
+                "quality_passed": False,
+            }
+        ],
+    )
+    threat = ThreatAnalysisAgent().analyze(
+        run_id="r1",
+        technology="HBM4",
+        company="Company A",
+        evidence_items=[
+            {
+                "evidence_id": "e1",
+                "run_id": "r1",
+                "technology": "HBM4",
+                "company": ["Company A"],
+                "title": "Qualification progress",
+                "signal_type": "direct",
+                "source_type": "news",
+                "published_at": "2025-01-01T00:00:00Z",
+                "raw_content": "qualification",
+                "key_points": ["qualification"],
+                "signals": [],
+                "counter_signals": [],
+                "quality_passed": False,
+            }
+        ],
+        trl_result=trl,
+    )
+
+    merged, rows = merge_analysis_results([trl], [threat])
+
+    assert merged[0].data_status == "coverage_gap"
+    assert merged[0].conflict_flag is False
+    assert rows[0].priority_bucket.value == "review_required"

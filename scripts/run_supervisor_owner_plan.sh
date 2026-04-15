@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+echo "[Supervisor Owner]"
+echo "문서 기준: service-spec.md, directory.md, workflow.md, supervisor.md"
+echo
+echo "1. service-spec.md에서 서비스 상태값, 실행 모델, approval 책임 확인"
+echo "2. directory.md에서 supervisor 담당 소유 범위 확인"
+echo "3. supervisor_state_schema.py 고정"
+echo "4. execution_state_repository.py 및 sqlite 저장 전략 정리"
+echo "5. planning.py 구현"
+echo "6. stage_gate.py 구현"
+echo "7. retry_controller.py 구현"
+echo "8. supervisor.py 구현"
+echo "9. stage_executor.py, execution_context.py와 연결"
+echo "10. final approval, partial re-entry, retry 정책 smoke test 수행"
+echo
+echo "[소유 범위]"
+echo "- src/supervisor/"
+echo "- src/orchestration/stage_executor.py"
+echo "- src/orchestration/execution_context.py"
+echo "- src/schemas/supervisor_state_schema.py"
+echo "- src/storage/repositories/execution_state_repository.py"
+echo "- src/config/settings.py"
+echo "- src/config/thresholds.py"
+echo "- src/config/agent_queries.py"
+echo "- tests/unit/test_supervisor_planning.py"
+echo "- tests/unit/test_stage_gate.py"
+echo "- tests/unit/test_retry_controller.py"
+echo "- tests/unit/test_final_approval.py"
+echo "- tests/integration/test_supervisor_pipeline_flow.py"
+echo
+echo "[수정 금지]"
+echo "- src/schemas/normalized_evidence_schema.py"
+echo "- src/schemas/analysis_output_schema.py"
+echo "- src/schemas/report_output_schema.py"
+echo "- src/agents/search/"
+echo "- src/agents/analysis/"
+echo "- src/orchestration/parallel_search_runner.py"
+echo "- src/orchestration/merge_node.py"

@@ -25,6 +25,7 @@ echo
 echo "4. Supervisor Owner 마지막 통합"
 echo "- stage gate, retry, approval 연결"
 echo "- final approval 기록 주체는 Supervisor"
+echo "- 실행: bash scripts/run_supervisor_owner_plan.sh"
 echo
 echo "5. 통합 순서"
 echo "- Search 결과 연결"

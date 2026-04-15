@@ -50,41 +50,28 @@
 ```mermaid
 flowchart TD
     U([User Query])
-    S[Central Supervisor]
-    P[Planning Module]
-    SR[Parallel Search Runner]
-    SA[6 Search Agents]
-    N[Evidence Normalizer]
-    Q[Quality Gate]
-    R[Retry Controller]
-    TA[TRL Analysis Agent]
-    TH[Threat Analysis Agent]
-    M[Merge Node]
-    RG[Report Generation Agent]
-    DB[(SQLite Repositories)]
-    OUT([Markdown / HTML / PDF Report])
+    S[Supervisor]
+    SE[Search Agents]
+    QG[Quality Gate Node]
+    TRL[TRL Analysis Agent]
+    THR[Threat Analysis Agent]
+    RP[Report Generation Agent]
+    END([END])
 
     U --> S
-    S --> P
-    P --> SR
-    SR --> SA
-    SA --> N
-    N --> Q
-    Q -->|fail or warning| R
-    R -->|targeted retry| SR
-    Q -->|pass| TA
-    Q -->|pass| TH
-    TA --> M
-    TH --> M
-    M --> RG
-    RG --> OUT
 
-    SR --> DB
-    N --> DB
-    Q --> DB
-    M --> DB
-    RG --> DB
-    S --> DB
+    S -->|지시시| SE
+    S -->|검증 요청| QG
+    S -->|분석 지시| TRL
+    S -->|분석 지시| THR
+    S -->|보고서 생성| RP
+    S --> END
+
+    SE -->|수집 완료| S
+    QG -->|pass or fail | S
+    TRL -->|TRL 매트릭스| S
+    THR -->|위협 수준| S
+    RP -->|보고서 완료| S
 ```
 
 ## Directory Structure
